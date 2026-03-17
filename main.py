@@ -159,8 +159,6 @@ if __name__ == "__main__":
     main()
 ```
 
-После вставки — **Commit changes** → Railway сам задеплоит.
-
 Сигнал будет выглядеть так в Telegram:
 ```
 🟢 СИГНАЛ — BTC-USDT-SWAP
