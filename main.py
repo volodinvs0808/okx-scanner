@@ -12,9 +12,9 @@ def send_telegram(message):
     requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": message})
 
 def get_futures_symbols():
-    url = "https://www.okx.com/api/v5/public/instruments?instType=FUTURES"
+    url = "https://www.okx.com/api/v5/public/instruments?instType=SWAP&ctType=linear"
     r = requests.get(url).json()
-    return [i["instId"] for i in r.get("data", [])]
+    return [i["instId"] for i in r.get("data", []) if i["instId"].endswith("-USDT-SWAP")]
 
 def get_candles(symbol):
     url = f"https://www.okx.com/api/v5/market/candles?instId={symbol}&bar=1m&limit=6"
