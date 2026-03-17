@@ -4,77 +4,174 @@ from datetime import datetime
 
 TELEGRAM_TOKEN = "8279259149:AAFyqvMHBnpRtMyaEMmPVJdSmffWGymWHYw"
 TELEGRAM_CHAT_ID = "6724936490"
-GAP_THRESHOLD = 0.05  # %
-CHECK_INTERVAL = 60   # секунд
+CHECK_INTERVAL = 60
 
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": message})
+    requests.post(url, data={
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "parse_mode": "HTML"
+    })
 
-def get_futures_symbols():
+def get_symbols():
     url = "https://www.okx.com/api/v5/public/instruments?instType=SWAP&ctType=linear"
-    r = requests.get(url).json()
+    r = requests.get(url, timeout=10).json()
     return [i["instId"] for i in r.get("data", []) if i["instId"].endswith("-USDT-SWAP")]
 
-def get_candles(symbol):
-    url = f"https://www.okx.com/api/v5/market/candles?instId={symbol}&bar=1m&limit=6"
-    r = requests.get(url).json()
-    return r.get("data", [])
+def get_candles(symbol, limit=60):
+    url = f"https://www.okx.com/api/v5/market/candles?instId={symbol}&bar=1m&limit={limit}"
+    r = requests.get(url, timeout=10).json()
+    data = r.get("data", [])
+    if not data:
+        return []
+    # Разворачиваем: OKX даёт новые первыми
+    return list(reversed(data))
 
-def check_symbol(symbol):
-    candles = get_candles(symbol)
-    if len(candles) < 6:
-        return False
-    
-    # OKX формат: [time, open, high, low, close, ...]
-    # candles[0] = самая новая
-    green = []
-    no_gap = []
-    
-    for i in range(5):
-        o = float(candles[i][1])
-        c = float(candles[i][4])
-        green.append(c > o)
-    
-    for i in range(4):
-        curr_open = float(candles[i][1])
-        prev_close = float(candles[i+1][4])
-        gap = abs(curr_open - prev_close) / prev_close * 100
-        no_gap.append(gap < GAP_THRESHOLD)
-    
-    return all(green) and all(no_gap)
+def ema(prices, period):
+    if len(prices) < period:
+        return None
+    k = 2 / (period + 1)
+    val = sum(prices[:period]) / period
+    for p in prices[period:]:
+        val = p * k + val * (1 - k)
+    return val
+
+def avg_volume(candles, period=20):
+    vols = [float(c[5]) for c in candles[-period:]]
+    return sum(vols) / len(vols) if vols else 0
+
+def analyze(symbol):
+    candles = get_candles(symbol, 60)
+    if len(candles) < 55:
+        return None
+
+    closes = [float(c[4]) for c in candles]
+    opens  = [float(c[1]) for c in candles]
+    highs  = [float(c[2]) for c in candles]
+    lows   = [float(c[3]) for c in candles]
+    vols   = [float(c[5]) for c in candles]
+
+    # --- EMA 21 / 50 ---
+    ema21 = ema(closes, 21)
+    ema50 = ema(closes, 50)
+    price = closes[-1]
+    if not ema21 or not ema50:
+        return None
+    trend_ok = price > ema21 > ema50
+
+    # --- RSI 14 ---
+    gains, losses = [], []
+    for i in range(-15, -1):
+        diff = closes[i] - closes[i-1]
+        gains.append(max(diff, 0))
+        losses.append(max(-diff, 0))
+    avg_gain = sum(gains) / 14
+    avg_loss = sum(losses) / 14
+    if avg_loss == 0:
+        rsi = 100
+    else:
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
+    rsi_ok = 50 <= rsi <= 72
+
+    # --- 5 зелёных свечей без гэпов ---
+    green_ok = all(closes[-i] > opens[-i] for i in range(1, 6))
+    gap_ok = all(
+        abs(opens[-i] - closes[-i-1]) / closes[-i-1] * 100 < 0.05
+        for i in range(1, 5)
+    )
+
+    # --- Объём выше среднего ---
+    avg_vol = avg_volume(candles[:-5], 20)
+    last_vols = vols[-5:]
+    vol_ok = avg_vol > 0 and (sum(last_vols) / 5) > avg_vol * 1.2
+
+    if trend_ok and rsi_ok and green_ok and gap_ok and vol_ok:
+        return {
+            "symbol": symbol,
+            "price": price,
+            "ema21": round(ema21, 6),
+            "ema50": round(ema50, 6),
+            "rsi": round(rsi, 1),
+            "vol_ratio": round((sum(last_vols)/5) / avg_vol, 2)
+        }
+    return None
+
+def format_signal(s):
+    deposit = 500
+    leverage = 10
+    volume = deposit * leverage
+    fee = volume * 0.001
+    tp_pct = 0.5
+    sl_pct = 0.25
+    profit = round(volume * tp_pct / 100 - fee, 2)
+    loss   = round(volume * sl_pct / 100 + fee, 2)
+    tp_price = round(s['price'] * (1 + tp_pct/100), 6)
+    sl_price = round(s['price'] * (1 - sl_pct/100), 6)
+
+    return (
+        f"🟢 <b>СИГНАЛ — {s['symbol']}</b>\n\n"
+        f"📍 Вход: <b>${s['price']}</b>\n"
+        f"✅ TP: ${tp_price} (+{tp_pct}%)\n"
+        f"❌ SL: ${sl_price} (-{sl_pct}%)\n\n"
+        f"📊 RSI: {s['rsi']} | Объём: x{s['vol_ratio']}\n"
+        f"📈 EMA21: {s['ema21']} | EMA50: {s['ema50']}\n\n"
+        f"💵 Прибыль (TP): +${profit}\n"
+        f"💸 Убыток (SL): -${loss}\n"
+        f"⚡️ Плечо x10 | Объём $5000\n\n"
+        f"⏰ {datetime.now().strftime('%H:%M:%S')}"
+    )
 
 def main():
-    send_telegram("🤖 OKX Scanner запущен! Мониторю фьючерсы...")
-    alerted = set()
-    
+    send_telegram("🤖 <b>Impulse Filter Bot запущен!</b>\n\nСтратегия: 5 зелёных + EMA21/50 + RSI + Объём\nПары: все USDT-SWAP фьючерсы OKX")
+    alerted = {}
+
     while True:
         try:
-            symbols = get_futures_symbols()
+            symbols = get_symbols()
             now = datetime.now().strftime("%H:%M")
-            print(f"[{now}] Проверяю {len(symbols)} пар...")
-            
+            print(f"[{now}] Сканирую {len(symbols)} пар...")
+
             for symbol in symbols:
                 try:
-                    if check_symbol(symbol):
-                        key = f"{symbol}_{now}"
-                        if key not in alerted:
-                            msg = f"🟢 {symbol}\n5 зелёных свечей подряд без гэпов!\n⏰ {now}"
+                    result = analyze(symbol)
+                    if result:
+                        last = alerted.get(symbol, "")
+                        if last != now:
+                            msg = format_signal(result)
                             send_telegram(msg)
-                            alerted.add(key)
-                            print(f"СИГНАЛ: {symbol}")
-                    time.sleep(0.1)
+                            alerted[symbol] = now
+                            print(f"СИГНАЛ: {symbol} | RSI:{result['rsi']} | Vol:x{result['vol_ratio']}")
+                    time.sleep(0.15)
                 except Exception as e:
-                    pass
-            
-            # Очищаем старые алерты
-            if len(alerted) > 1000:
+                    print(f"Ошибка {symbol}: {e}")
+
+            if len(alerted) > 500:
                 alerted.clear()
-                
+
         except Exception as e:
-            print(f"Ошибка: {e}")
-        
+            print(f"Общая ошибка: {e}")
+
         time.sleep(CHECK_INTERVAL)
 
 if __name__ == "__main__":
     main()
+```
+
+После вставки — **Commit changes** → Railway сам задеплоит.
+
+Сигнал будет выглядеть так в Telegram:
+```
+🟢 СИГНАЛ — BTC-USDT-SWAP
+
+📍 Вход: $84,250
+✅ TP: $84,671 (+0.5%)
+❌ SL: $84,039 (-0.25%)
+
+📊 RSI: 61.3 | Объём: x1.8
+📈 EMA21: 84,100 | EMA50: 83,750
+
+💵 Прибыль (TP): +$15.00
+💸 Убыток (SL): -$7.50
+⚡️ Плечо x10 | Объём $5000
