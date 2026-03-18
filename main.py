@@ -146,17 +146,17 @@ def analyze(symbol):
         return None
     lower_wick = min(sig_open, sig_close) - sig_low
     wick_ratio = lower_wick / candle_range
-    strong_wick = wick_ratio >= 0.55
+    strong_wick = wick_ratio >= 0.45
 
     avg_vol = sum(vols[-25:-4]) / 21 if len(vols) >= 25 else sum(vols[:-4]) / max(len(vols) - 4, 1)
-    vol_spike = avg_vol > 0 and sig_vol > avg_vol * 2.0
+    vol_spike = avg_vol > 0 and sig_vol > avg_vol * 1.5
 
     conf_green = conf_close > conf_open
     conf_above = conf_close > local_low
     curr_holding = curr_close >= conf_open * 0.9995
 
     rsi_val = rsi(closes, 14)
-    rsi_ok = rsi_val is not None and 35 <= rsi_val <= 65
+    rsi_ok = rsi_val is not None and 30 <= rsi_val <= 70
 
     trend_up = check_15m_trend(symbol)
 
@@ -177,7 +177,7 @@ def analyze(symbol):
         return None
 
     rr = TP_PCT / sl_pct
-    if rr < 3.0:
+    if rr < 2.0:
         return None
 
     fee = VOLUME * FEE_PCT / 100
