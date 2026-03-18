@@ -1,8 +1,6 @@
 """
-OKX Smart Scanner v5.2
-+ Inline knopki rezultata sdelki
-+ Avtoanaliz tochki vhoda
-+ Zhurnal s rezultatami dlya V6
+OKX Scanner v6.0 - Simple & Working
+Два типа сигналов: Trend + Pullback
 """
 
 import requests
@@ -15,107 +13,81 @@ from datetime import datetime, timezone, timedelta
 TELEGRAM_TOKEN   = "8279259149:AAFyqvMHBnpRtMyaEMmPVJdSmffWGymWHYw"
 TELEGRAM_CHAT_ID = "6724936490"
 
-DEPOSIT          = 509
-LEVERAGE         = 5
-VOLUME           = DEPOSIT * LEVERAGE
-TP_PCT           = 1.5
-FEE_PCT          = 0.1
-SIGNAL_COOLDOWN  = 1800
-SCAN_INTERVAL    = 60
-
-MIN_RR           = 3.0
-WICK_MIN         = 0.40
-VOL_MULT         = 1.4
-RSI_LOW          = 25
-RSI_HIGH         = 72
-SL_MIN_PCT       = 0.08
-SL_MAX_PCT       = 0.35
+DEPOSIT  = 509
+LEVERAGE = 5
+VOLUME   = DEPOSIT * LEVERAGE
+TP_PCT   = 1.0
+FEE_PCT  = 0.1
+COOLDOWN = 1800
+INTERVAL = 60
 
 KYIV_TZ = timezone(timedelta(hours=2))
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-    datefmt="%H:%M:%S"
-)
-log = logging.getLogger("scanner")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
+log = logging.getLogger("bot")
 
-# ── Zhurnal sdelok ────────────────────────────────────────────────────────────
-
-trades    = {}
-counter   = 0
-offset    = 0
-
-# ── Utils ─────────────────────────────────────────────────────────────────────
+trades  = {}
+counter = 0
+offset  = 0
 
 def now_kyiv():
     return datetime.now(KYIV_TZ)
 
 def get_session():
     h = now_kyiv().hour
-    if   2 <= h <  8: return "Asia"
-    elif 8 <= h < 12: return "London"
-    elif 14<= h < 19: return "NewYork"
+    if 2  <= h < 8:  return "Asia"
+    if 8  <= h < 12: return "London"
+    if 14 <= h < 19: return "NewYork"
     return "OffHours"
 
 def ema(prices, period):
     if len(prices) < period:
         return None
-    k   = 2 / (period + 1)
-    val = sum(prices[:period]) / period
+    k = 2 / (period + 1)
+    v = sum(prices[:period]) / period
     for p in prices[period:]:
-        val = p * k + val * (1 - k)
-    return val
+        v = p * k + v * (1 - k)
+    return v
 
 def rsi(closes, period=14):
     if len(closes) < period + 1:
         return None
-    gains, losses = [], []
+    g, l = [], []
     for i in range(-period, 0):
         d = closes[i] - closes[i-1]
-        gains.append(max(d, 0))
-        losses.append(max(-d, 0))
-    ag = sum(gains) / period
-    al = sum(losses) / period
-    if al == 0:
-        return 100.0
+        g.append(max(d, 0))
+        l.append(max(-d, 0))
+    ag = sum(g) / period
+    al = sum(l) / period
+    if al == 0: return 100.0
     return 100 - (100 / (1 + ag / al))
 
-def atr(candles, period=14):
-    if len(candles) < period + 1:
-        return None
-    trs = []
-    for i in range(1, len(candles)):
-        h  = float(candles[i][2])
-        l  = float(candles[i][3])
-        pc = float(candles[i-1][4])
-        trs.append(max(h - l, abs(h - pc), abs(l - pc)))
-    return sum(trs[-period:]) / period
-
-# ── API OKX ───────────────────────────────────────────────────────────────────
-
 def fetch_symbols():
-    url = "https://www.okx.com/api/v5/public/instruments?instType=SWAP&ctType=linear"
-    r   = requests.get(url, timeout=10).json()
+    r = requests.get(
+        "https://www.okx.com/api/v5/public/instruments?instType=SWAP&ctType=linear",
+        timeout=10
+    ).json()
     return [i["instId"] for i in r.get("data", []) if i["instId"].endswith("-USDT-SWAP")]
 
-def fetch_candles(symbol, bar="5m", limit=100):
-    url  = f"https://www.okx.com/api/v5/market/candles?instId={symbol}&bar={bar}&limit={limit}"
-    r    = requests.get(url, timeout=10).json()
+def fetch_candles(symbol, bar="5m", limit=80):
+    r = requests.get(
+        f"https://www.okx.com/api/v5/market/candles?instId={symbol}&bar={bar}&limit={limit}",
+        timeout=10
+    ).json()
     data = r.get("data", [])
     return list(reversed(data)) if data else []
 
-def get_current_price(symbol):
-    url = f"https://www.okx.com/api/v5/market/ticker?instId={symbol}"
-    r   = requests.get(url, timeout=10).json()
-    d   = r.get("data", [])
+def get_price(symbol):
+    r = requests.get(
+        f"https://www.okx.com/api/v5/market/ticker?instId={symbol}",
+        timeout=10
+    ).json()
+    d = r.get("data", [])
     return float(d[0]["last"]) if d else None
 
-# ── Analyze ───────────────────────────────────────────────────────────────────
-
 def analyze(symbol):
-    candles = fetch_candles(symbol, bar="5m", limit=100)
-    if len(candles) < 55:
+    candles = fetch_candles(symbol)
+    if len(candles) < 40:
         return None
 
     o = [float(c[1]) for c in candles]
@@ -129,74 +101,53 @@ def analyze(symbol):
     e9  = ema(c, 9)
     e21 = ema(c, 21)
     e50 = ema(c, 50)
-    if not e9 or not e21 or not e50:
+    if not all([e9, e21, e50]):
         return None
 
-    trend_ok = e9 > e21 > e50 * 0.998
-
-    rsi_v = rsi(c, 14)
-    if rsi_v is None:
-        return None
-    rsi_ok = RSI_LOW <= rsi_v <= RSI_HIGH
-
-    rsi_prev   = rsi(c[:-1], 14)
-    rsi_bounce = rsi_prev is not None and rsi_v > rsi_prev
-
-    avg_v  = sum(v[-30:-4]) / 26
-    vol_ok = avg_v > 0 and v[-1] > avg_v * 1.2
-
-    atr_v  = atr(candles, 14)
-    atr_ok = atr_v is not None and (atr_v / price * 100) >= 0.03
-
-    # Тип 1: Liquidity Grab
-    local_low = min(l[-28:-4])
-    s_o, s_h  = o[-3], h[-3]
-    s_l, s_c  = l[-3], c[-3]
-    s_v       = v[-3]
-    rng = s_h - s_l
-    sig_type  = None
-    sig_vol   = s_v
-    wick_r    = 0
-
-    if rng > 1e-9:
-        wick   = min(s_o, s_c) - s_l
-        wick_r = wick / rng
-        swept     = s_l < local_low * 0.9998
-        reclaimed = s_c >= local_low
-        wick_ok   = wick_r >= WICK_MIN
-        conf_ok   = c[-2] > o[-2] and c[-2] > local_low
-        curr_ok   = c[-1] >= o[-2] * 0.9990
-        body_ok   = abs(s_c - s_o) / rng <= 0.55
-
-        if (trend_ok and rsi_ok and rsi_bounce and swept and reclaimed
-                and wick_ok and vol_ok and conf_ok and curr_ok and atr_ok and body_ok):
-            sig_type = "LIQUIDITY GRAB"
-            sig_vol  = s_v
-
-    # Тип 2: Trend Pullback — откат к EMA и отскок
-    if sig_type is None:
-        near_ema   = abs(price - e21) / e21 * 100 < 0.2
-        bounce_ok  = c[-1] > o[-1] and c[-2] > o[-2]
-        above_e50  = price > e50
-        rsi_trend  = 40 <= rsi_v <= 65
-
-        if (trend_ok and near_ema and bounce_ok and above_e50
-                and rsi_trend and rsi_bounce and vol_ok and atr_ok):
-            sig_type = "TREND PULLBACK"
-            sig_vol  = v[-1]
-
-    if sig_type is None:
+    rsi_v    = rsi(c, 14)
+    rsi_prev = rsi(c[:-1], 14)
+    if rsi_v is None or rsi_prev is None:
         return None
 
-    entry    = price
-    sl_price = min(l[-5:]) * 0.9997
-    sl_pct   = abs(entry - sl_price) / entry * 100
+    avg_v = sum(v[-25:-2]) / 23
 
-    if not (SL_MIN_PCT <= sl_pct <= SL_MAX_PCT):
+    # ── ТИП 1: Trend Momentum ──────────────────────────────────────────
+    # EMA выстроены, RSI растёт, объём есть
+    type1 = (
+        e9 > e21 > e50 and
+        40 <= rsi_v <= 68 and
+        rsi_v > rsi_prev and
+        c[-1] > o[-1] and
+        c[-2] > o[-2] and
+        v[-1] > avg_v * 1.1 and
+        price > e21
+    )
+
+    # ── ТИП 2: EMA Bounce ──────────────────────────────────────────────
+    # Цена отскочила от EMA21, RSI выходит из перепроданности
+    near_ema = abs(price - e21) / e21 * 100 < 0.3
+    type2 = (
+        e21 > e50 and
+        near_ema and
+        35 <= rsi_v <= 60 and
+        rsi_v > rsi_prev and
+        c[-1] > o[-1] and
+        v[-1] > avg_v * 1.1
+    )
+
+    if not type1 and not type2:
         return None
 
-    rr_val = TP_PCT / sl_pct
-    if rr_val < MIN_RR:
+    sig_type = "TREND" if type1 else "EMA BOUNCE"
+
+    sl_price = min(l[-6:]) * 0.9998
+    sl_pct   = abs(price - sl_price) / price * 100
+
+    if sl_pct < 0.08 or sl_pct > 0.5:
+        return None
+
+    rr = TP_PCT / sl_pct
+    if rr < 2.0:
         return None
 
     fee    = VOLUME * FEE_PCT / 100
@@ -204,231 +155,172 @@ def analyze(symbol):
     loss   = round(VOLUME * sl_pct / 100 + fee, 2)
 
     return {
-        "symbol":   symbol,
-        "entry":    round(entry, 8),
-        "tp":       round(entry * (1 + TP_PCT / 100), 8),
-        "sl":       round(sl_price, 8),
-        "sl_pct":   round(sl_pct, 3),
-        "rr":       round(rr_val, 1),
-        "rsi":      round(rsi_v, 1),
-        "vol":      round(sig_vol / avg_v, 2),
-        "wick":     round(wick_r * 100, 1),
-        "profit":   profit,
-        "loss":     loss,
-        "level":    round(local_low, 8),
-        "session":  get_session(),
-        "type":     sig_type,
+        "symbol":  symbol,
+        "type":    sig_type,
+        "entry":   round(price, 8),
+        "tp":      round(price * (1 + TP_PCT / 100), 8),
+        "sl":      round(sl_price, 8),
+        "sl_pct":  round(sl_pct, 3),
+        "rr":      round(rr, 1),
+        "rsi":     round(rsi_v, 1),
+        "vol":     round(v[-1] / avg_v, 2),
+        "profit":  profit,
+        "loss":    loss,
+        "session": get_session(),
+        "e9":      round(e9, 6),
+        "e21":     round(e21, 6),
     }
 
-# ── Telegram ──────────────────────────────────────────────────────────────────
-
-def send(text, reply_markup=None):
+def send(text, markup=None):
     url  = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    data = {
-        "chat_id":    TELEGRAM_CHAT_ID,
-        "text":       text,
-        "parse_mode": "HTML"
-    }
-    if reply_markup:
-        data["reply_markup"] = json.dumps(reply_markup)
+    data = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
+    if markup:
+        data["reply_markup"] = json.dumps(markup)
     try:
         r = requests.post(url, data=data, timeout=10)
         return r.json().get("result", {}).get("message_id")
     except Exception as e:
-        log.warning(f"Telegram send: {e}")
-        return None
+        log.warning(f"send: {e}")
 
-def edit_message(message_id, text):
-    url  = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText"
-    data = {
-        "chat_id":    TELEGRAM_CHAT_ID,
-        "message_id": message_id,
-        "text":       text,
-        "parse_mode": "HTML"
-    }
+def edit(msg_id, text):
     try:
-        requests.post(url, data=data, timeout=10)
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText",
+            data={"chat_id": TELEGRAM_CHAT_ID, "message_id": msg_id,
+                  "text": text, "parse_mode": "HTML"},
+            timeout=10
+        )
     except Exception as e:
-        log.warning(f"Telegram edit: {e}")
+        log.warning(f"edit: {e}")
 
-def answer_callback(callback_id, text):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery"
+def answer_cb(cb_id, text):
     try:
-        requests.post(url, data={
-            "callback_query_id": callback_id,
-            "text": text
-        }, timeout=10)
-    except Exception as e:
-        log.warning(f"Callback: {e}")
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery",
+            data={"callback_query_id": cb_id, "text": text},
+            timeout=10
+        )
+    except: pass
 
-def format_signal(s, num):
-    stars = "*" * min(int(s["rr"]), 5)
-    stars = stars + "o" * (5 - len(stars))
+def fmt_signal(s, num):
+    icon = "🔥" if s["type"] == "TREND" else "📍"
+    stars = "*" * min(int(s["rr"]), 5) + "o" * (5 - min(int(s["rr"]), 5))
     return (
-        f"<b>SIGNAL #{num}  {s['symbol']}</b>  [{s['session']}]\n\n"
+        f"{icon} <b>#{num} {s['symbol']}</b> [{s['session']}]\n"
+        f"<i>{s['type']}</i>\n\n"
         f"Vhod:  <b>${s['entry']}</b>\n"
         f"TP:    <b>${s['tp']}</b>  +{TP_PCT}%\n"
         f"SL:    <b>${s['sl']}</b>  -{s['sl_pct']}%\n\n"
-        f"RR:    1:{s['rr']}  {stars}\n"
-        f"RSI:   {s['rsi']} | Vol: x{s['vol']} | Fitil: {s['wick']}%\n\n"
-        f"Pribyl (TP): <b>+${s['profit']}</b>\n"
-        f"Ubytok (SL): <b>-${s['loss']}</b>\n"
-        f"Obem: ${VOLUME}  x{LEVERAGE}\n\n"
-        f"{now_kyiv().strftime('%d.%m  %H:%M:%S')}\n\n"
-        f"<i>Nazhmi rezultat posle zakrytiya sdelki:</i>"
+        f"RR: 1:{s['rr']}  {stars}\n"
+        f"RSI: {s['rsi']} | Vol: x{s['vol']}\n"
+        f"EMA9: {s['e9']} | EMA21: {s['e21']}\n\n"
+        f"Pribyl: <b>+${s['profit']}</b>\n"
+        f"Ubytok: <b>-${s['loss']}</b>\n"
+        f"${VOLUME} x{LEVERAGE}\n\n"
+        f"{now_kyiv().strftime('%d.%m %H:%M:%S')}"
     )
 
-def make_buttons(num):
-    return {
-        "inline_keyboard": [[
-            {"text": "TP",        "callback_data": f"tp_{num}"},
-            {"text": "SL",        "callback_data": f"sl_{num}"},
-            {"text": "Eshche v pozitsii", "callback_data": f"hold_{num}"}
-        ]]
-    }
-
-def format_result(s, num, result, current_price=None):
-    base = (
-        f"<b>SIGNAL #{num}  {s['symbol']}</b>  [{s['session']}]\n\n"
-        f"Vhod:  ${s['entry']}\n"
-        f"TP:    ${s['tp']}  +{TP_PCT}%\n"
-        f"SL:    ${s['sl']}  -{s['sl_pct']}%\n"
-        f"RR:    1:{s['rr']}\n\n"
-    )
-
+def fmt_result(s, num, result, price=None):
+    base = f"<b>#{num} {s['symbol']}</b> [{s['type']}]\n\n"
+    base += f"Vhod: ${s['entry']} | TP: ${s['tp']} | SL: ${s['sl']}\n\n"
     if result == "tp":
-        base += f"REZULTAT: TP +${s['profit']}\n"
-        base += "Otlichno! Sdelka zakryta v plus."
+        base += f"REZULTAT: TP +${s['profit']}"
     elif result == "sl":
-        base += f"REZULTAT: SL -${s['loss']}\n"
-        base += "Stoploss. Sleduyushchiy signal budet luchshe."
-    elif result == "hold":
-        if current_price:
-            pnl_pct = (current_price - s['entry']) / s['entry'] * 100
-            pnl_usd = round(VOLUME * pnl_pct / 100, 2)
-            sign    = "+" if pnl_usd >= 0 else ""
-            base   += f"POZITSIYA OTKRYTA\n"
-            base   += f"Tekushchaya tsena: ${current_price}\n"
-            base   += f"Tekushchiy PnL: {sign}${pnl_usd} ({sign}{pnl_pct:.2f}%)\n"
-            base   += f"Do TP: {round(s['tp'] - current_price, 6)}\n"
-            base   += f"Do SL: {round(current_price - s['sl'], 6)}"
-        else:
-            base += "POZITSIYA OTKRYTA"
-
+        base += f"REZULTAT: SL -${s['loss']}"
+    elif result == "hold" and price:
+        pnl_pct = (price - s['entry']) / s['entry'] * 100
+        pnl_usd = round(VOLUME * pnl_pct / 100, 2)
+        sign = "+" if pnl_usd >= 0 else ""
+        base += (
+            f"POZITSIYA OTKRYTA\n"
+            f"Tsena: ${price}\n"
+            f"PnL: {sign}${pnl_usd} ({sign}{pnl_pct:.2f}%)\n"
+            f"Do TP: {round(s['tp'] - price, 6)}"
+        )
     return base
 
-def send_daily_stats():
-    total   = len(trades)
-    tp_list = [t for t in trades.values() if t.get("result") == "tp"]
-    sl_list = [t for t in trades.values() if t.get("result") == "sl"]
-    open_l  = [t for t in trades.values() if t.get("result") == "hold" or not t.get("result")]
+def buttons(num):
+    return {"inline_keyboard": [[
+        {"text": "TP",  "callback_data": f"tp_{num}"},
+        {"text": "SL",  "callback_data": f"sl_{num}"},
+        {"text": "Derzu", "callback_data": f"hold_{num}"}
+    ]]}
 
-    tp_count = len(tp_list)
-    sl_count = len(sl_list)
-    wr       = round(tp_count / max(tp_count + sl_count, 1) * 100)
-
-    fee      = VOLUME * FEE_PCT / 100
-    profit   = VOLUME * TP_PCT / 100 - fee
-    loss_avg = VOLUME * 0.22 / 100 + fee
-    pnl      = round(tp_count * profit - sl_count * loss_avg, 2)
-
-    today = now_kyiv().strftime("%d.%m.%Y")
-    text  = (
-        f"<b>Statistika za {today}</b>\n\n"
-        f"Vsego signalov: {total}\n"
-        f"TP: {tp_count}  |  SL: {sl_count}  |  Otkryty: {len(open_l)}\n"
-        f"Vinreyt: {wr}%\n"
-        f"PnL za den: {'+'if pnl>=0 else ''}{pnl}\n\n"
-        f"<b>Zhurnal (dlya analiza V6):</b>\n\n"
-    )
-
-    for num, t in list(trades.items())[-20:]:
-        s   = t["signal"]
-        res = t.get("result", "?").upper()
-        text += (
-            f"<code>#{num}|{t['time']}|{s['symbol']}|{s['session']}|"
-            f"rr:1:{s['rr']}|rsi:{s['rsi']}|vol:x{s['vol']}|"
-            f"fitil:{s['wick']}%|{res}</code>\n"
-        )
-
-    text += "\n<i>Peredaj etot spisok Claude dlya V6</i>"
-    send(text)
-
-# ── Polling callbacks ─────────────────────────────────────────────────────────
-
-def poll_callbacks():
+def poll():
     global offset
     while True:
         try:
-            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
-            r   = requests.get(url, params={
-                "offset":  offset,
-                "timeout": 30,
-                "allowed_updates": ["callback_query"]
-            }, timeout=35).json()
-
-            for update in r.get("result", []):
-                offset = update["update_id"] + 1
-                cb     = update.get("callback_query")
-                if not cb:
-                    continue
-
-                data   = cb.get("data", "")
-                cb_id  = cb["id"]
-                msg_id = cb["message"]["message_id"]
-
-                parts  = data.split("_")
-                if len(parts) != 2:
-                    continue
-
-                action = parts[0]
-                try:
-                    num = int(parts[1])
-                except ValueError:
-                    continue
-
+            r = requests.get(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates",
+                params={"offset": offset, "timeout": 25, "allowed_updates": ["callback_query"]},
+                timeout=30
+            ).json()
+            for upd in r.get("result", []):
+                offset = upd["update_id"] + 1
+                cb = upd.get("callback_query")
+                if not cb: continue
+                parts = cb.get("data", "").split("_")
+                if len(parts) != 2: continue
+                action, num_str = parts
+                try: num = int(num_str)
+                except: continue
                 if num not in trades:
-                    answer_callback(cb_id, "Signal ne najden")
+                    answer_cb(cb["id"], "Ne najden")
                     continue
-
-                trade = trades[num]
-                sig   = trade["signal"]
-
+                t   = trades[num]
+                sig = t["signal"]
+                mid = cb["message"]["message_id"]
                 if action == "tp":
                     trades[num]["result"] = "tp"
-                    answer_callback(cb_id, f"+${sig['profit']} TP!")
-                    edit_message(msg_id, format_result(sig, num, "tp"))
-
+                    answer_cb(cb["id"], f"+${sig['profit']} TP!")
+                    edit(mid, fmt_result(sig, num, "tp"))
                 elif action == "sl":
                     trades[num]["result"] = "sl"
-                    answer_callback(cb_id, f"-${sig['loss']} SL")
-                    edit_message(msg_id, format_result(sig, num, "sl"))
-
+                    answer_cb(cb["id"], f"-${sig['loss']} SL")
+                    edit(mid, fmt_result(sig, num, "sl"))
                 elif action == "hold":
                     trades[num]["result"] = "hold"
-                    price = get_current_price(sig["symbol"])
-                    answer_callback(cb_id, "Proveryayu tsenu...")
-                    edit_message(msg_id, format_result(sig, num, "hold", price))
-
+                    p = get_price(sig["symbol"])
+                    answer_cb(cb["id"], "Proveryayu...")
+                    edit(mid, fmt_result(sig, num, "hold", p))
         except Exception as e:
-            log.debug(f"Polling: {e}")
+            log.debug(f"poll: {e}")
         time.sleep(1)
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+def daily_stats():
+    total = len(trades)
+    tp_n  = sum(1 for t in trades.values() if t.get("result") == "tp")
+    sl_n  = sum(1 for t in trades.values() if t.get("result") == "sl")
+    wr    = round(tp_n / max(tp_n + sl_n, 1) * 100)
+    fee   = VOLUME * FEE_PCT / 100
+    pnl   = round(tp_n * (VOLUME * TP_PCT/100 - fee) - sl_n * (VOLUME * 0.25/100 + fee), 2)
+    sign  = "+" if pnl >= 0 else ""
+
+    text = (
+        f"<b>Statistika za {now_kyiv().strftime('%d.%m.%Y')}</b>\n\n"
+        f"Signalov: {total} | TP: {tp_n} | SL: {sl_n}\n"
+        f"Vinreyt: {wr}%\n"
+        f"PnL: {sign}${pnl}\n\n"
+        f"<b>Zhurnal dlya V7:</b>\n"
+    )
+    for num, t in list(trades.items())[-20:]:
+        s   = t["signal"]
+        res = (t.get("result") or "?").upper()
+        text += f"<code>#{num}|{t['time']}|{s['symbol']}|{s['type']}|rr:1:{s['rr']}|rsi:{s['rsi']}|{res}</code>\n"
+    send(text)
 
 def main():
     global counter
-
-    threading.Thread(target=poll_callbacks, daemon=True).start()
+    threading.Thread(target=poll, daemon=True).start()
 
     send(
-        "<b>Smart Scanner v5.2 zapushen!</b>\n\n"
-        "Novoe: knopki rezultata sdelki\n"
-        "- Nazhmi TP / SL / Eshche v pozitsii\n"
-        "- Bот zapishet rezultat i pokazhet PnL\n"
-        "- Kazhdyy den v 23:55 statistika + zhurnal\n\n"
-        f"TP: {TP_PCT}% | RR min: 1:{MIN_RR} | x{LEVERAGE}\n"
-        f"Depozit: ${DEPOSIT} | Obem: ${VOLUME}\n\n"
+        "<b>OKX Scanner v6.0 zapushen!</b>\n\n"
+        "2 tipa signalov:\n"
+        "🔥 TREND - silnyj impuls vverh\n"
+        "📍 EMA BOUNCE - otkат k EMA21\n\n"
+        f"TP: {TP_PCT}% | x{LEVERAGE} | ${VOLUME}\n"
+        "Knopki: TP / SL / Derzu\n"
+        "Statistika kazhdyj den v 23:55\n\n"
         "Rezhim: 24/7"
     )
 
@@ -442,59 +334,50 @@ def main():
             found  = 0
 
             if now_dt.hour == 23 and now_dt.minute == 55 and now_dt.day != last_stat_day:
-                send_daily_stats()
+                daily_stats()
+                trades.clear()
                 last_stat_day = now_dt.day
 
             symbols = fetch_symbols()
-            log.info(f"Scan {len(symbols)} par | {get_session()}")
+            log.info(f"Scan {len(symbols)} | {get_session()}")
 
             for symbol in symbols:
                 try:
-                    if now_ts - alerted.get(symbol, 0) < SIGNAL_COOLDOWN:
+                    if now_ts - alerted.get(symbol, 0) < COOLDOWN:
                         continue
-
                     sig = analyze(symbol)
-
                     if sig:
                         counter += 1
-                        num      = counter
-
-                        msg_id = send(
-                            format_signal(sig, num),
-                            reply_markup=make_buttons(num)
-                        )
-
+                        num = counter
+                        mid = send(fmt_signal(sig, num), markup=buttons(num))
                         trades[num] = {
                             "signal": sig,
-                            "msg_id": msg_id,
-                            "time":   now_kyiv().strftime("%d.%m %H:%M"),
+                            "msg_id": mid,
+                            "time":   now_dt.strftime("%d.%m %H:%M"),
                             "result": None
                         }
-
                         alerted[symbol] = now_ts
                         found += 1
-                        log.info(f"SIGNAL #{num} {symbol} RR:1:{sig['rr']}")
-
+                        log.info(f"SIGNAL #{num} {symbol} {sig['type']} RR:1:{sig['rr']}")
                     time.sleep(0.15)
-
                 except Exception as e:
                     log.debug(f"skip {symbol}: {e}")
 
-            log.info(f"Signaly: {found} | pauza {SCAN_INTERVAL}s")
+            log.info(f"Signaly: {found} | pauza {INTERVAL}s")
 
-            cutoff  = now_ts - SIGNAL_COOLDOWN * 3
+            cutoff  = now_ts - COOLDOWN * 3
             alerted = {k: v for k, v in alerted.items() if v > cutoff}
 
-            if len(trades) > 200:
-                old_keys = sorted(trades.keys())[:-100]
-                for k in old_keys:
+            if len(trades) > 300:
+                old = sorted(trades.keys())[:-150]
+                for k in old:
                     del trades[k]
 
         except Exception as e:
             log.error(f"Error: {e}")
             time.sleep(30)
 
-        time.sleep(SCAN_INTERVAL)
+        time.sleep(INTERVAL)
 
 if __name__ == "__main__":
     main()
