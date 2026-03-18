@@ -137,7 +137,7 @@ def analyze(symbol):
         return None
     rsi_ok     = RSI_LOW <= rsi_v <= RSI_HIGH
     rsi_prev   = rsi(c[:-1], 14)
-    rsi_bounce = rsi_prev is not None and rsi_prev < 50 and rsi_v > rsi_prev
+    rsi_bounce = rsi_prev is not None and rsi_v > rsi_prev
 
     local_low = min(l[-28:-4])
     s_o, s_h  = o[-3], h[-3]
@@ -154,7 +154,7 @@ def analyze(symbol):
     wick_ok   = wick_r >= WICK_MIN
 
     avg_v  = sum(v[-30:-4]) / 26
-    vol_ok = avg_v > 0 and s_v > avg_v * VOL_MULT
+    vol_ok = avg_v > 0 and s_v > avg_v * 1.2
     conf_ok = c[-2] > o[-2] and c[-2] > local_low
     curr_ok = c[-1] > o[-1] and c[-1] >= o[-2] * 0.9995
     atr_v   = atr(candles, 14)
