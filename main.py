@@ -1,12 +1,6 @@
 """
-OKX Smart Scanner v5.0
-Strategiya: Multi-Signal Confluence
-- EMA Cross (trend)
-- RSI Oversold Bounce (moment)
-- Volume Spike (podtverzhdenie)
-- Liquidity Sweep (tochka vhoda)
-TP: 1.5% | SL: dinamicheskij 0.10-0.30%
-RR: 1:5+ | Breakeven: 15%
+OKX Smart Scanner v5.1
++ Avtozapis signalov dlya analiza V6
 """
 
 import requests
@@ -17,24 +11,24 @@ from typing import Optional
 
 # ── Nastroyki ─────────────────────────────────────────────────────────────────
 
-TELEGRAM_TOKEN  = "8279259149:AAFyqvMHBnpRtMyaEMmPVJdSmffWGymWHYw"
-TELEGRAM_CHAT_ID= "6724936490"
+TELEGRAM_TOKEN   = "8279259149:AAFyqvMHBnpRtMyaEMmPVJdSmffWGymWHYw"
+TELEGRAM_CHAT_ID = "6724936490"
 
-DEPOSIT         = 509
-LEVERAGE        = 5
-VOLUME          = DEPOSIT * LEVERAGE
-TP_PCT          = 1.5
-FEE_PCT         = 0.1
-SIGNAL_COOLDOWN = 1800
-SCAN_INTERVAL   = 60
+DEPOSIT          = 509
+LEVERAGE         = 5
+VOLUME           = DEPOSIT * LEVERAGE
+TP_PCT           = 1.5
+FEE_PCT          = 0.1
+SIGNAL_COOLDOWN  = 1800
+SCAN_INTERVAL    = 60
 
-MIN_RR          = 3.0
-WICK_MIN        = 0.40
-VOL_MULT        = 1.4
-RSI_LOW         = 25
-RSI_HIGH        = 72
-SL_MIN_PCT      = 0.08
-SL_MAX_PCT      = 0.35
+MIN_RR           = 3.0
+WICK_MIN         = 0.40
+VOL_MULT         = 1.4
+RSI_LOW          = 25
+RSI_HIGH         = 72
+SL_MIN_PCT       = 0.08
+SL_MAX_PCT       = 0.35
 
 KYIV_TZ = timezone(timedelta(hours=2))
 
@@ -47,6 +41,11 @@ logging.basicConfig(
 )
 log = logging.getLogger("scanner")
 
+# ── Journal ───────────────────────────────────────────────────────────────────
+
+signal_journal = []
+signal_counter = 0
+
 # ── Utils ─────────────────────────────────────────────────────────────────────
 
 def now_kyiv():
@@ -56,8 +55,8 @@ def get_session():
     h = now_kyiv().hour
     if   2 <= h <  8: return "Asia"
     elif 8 <= h < 12: return "London"
-    elif 14<= h < 19: return "New York"
-    return "Off-Hours"
+    elif 14<= h < 19: return "NewYork"
+    return "OffHours"
 
 def ema(prices, period):
     if len(prices) < period:
@@ -106,7 +105,7 @@ def fetch_candles(symbol, bar="5m", limit=100):
     data = r.get("data", [])
     return list(reversed(data)) if data else []
 
-# ── Core analyze ──────────────────────────────────────────────────────────────
+# ── Analyze ───────────────────────────────────────────────────────────────────
 
 def analyze(symbol):
     candles = fetch_candles(symbol, bar="5m", limit=100)
@@ -121,7 +120,6 @@ def analyze(symbol):
 
     price = c[-1]
 
-    # ── Trend: EMA9 > EMA21 > EMA50 ──
     e9  = ema(c, 9)
     e21 = ema(c, 21)
     e50 = ema(c, 50)
@@ -129,17 +127,14 @@ def analyze(symbol):
         return None
     trend_ok = e9 > e21 > e50 * 0.998
 
-    # ── RSI ──
-    rsi_v  = rsi(c, 14)
+    rsi_v = rsi(c, 14)
     if rsi_v is None:
         return None
     rsi_ok = RSI_LOW <= rsi_v <= RSI_HIGH
 
-    # ── RSI razvorot: byl nizhe 45, teper rastet ──
-    rsi_prev = rsi(c[:-1], 14)
+    rsi_prev   = rsi(c[:-1], 14)
     rsi_bounce = rsi_prev is not None and rsi_prev < 50 and rsi_v > rsi_prev
 
-    # ── Liquidity sweep: svecha [-3] ──
     local_low = min(l[-28:-4])
     s_o, s_h  = o[-3], h[-3]
     s_l, s_c  = l[-3], c[-3]
@@ -155,19 +150,15 @@ def analyze(symbol):
     wick_r = wick / rng
     wick_ok = wick_r >= WICK_MIN
 
-    # ── Volume ──
     avg_v  = sum(v[-30:-4]) / 26
     vol_ok = avg_v > 0 and s_v > avg_v * VOL_MULT
 
-    # ── Podtverzhdenie ──
     conf_ok = c[-2] > o[-2] and c[-2] > local_low
     curr_ok = c[-1] > o[-1] and c[-1] >= o[-2] * 0.9995
 
-    # ── ATR - volatilnost ──
     atr_v  = atr(candles, 14)
     atr_ok = atr_v is not None and (atr_v / price * 100) >= 0.03
 
-    # ── Telo svechki ne ogromnoe ──
     body_ok = abs(s_c - s_o) / rng <= 0.55
 
     all_ok = (trend_ok and rsi_ok and rsi_bounce and
@@ -177,7 +168,6 @@ def analyze(symbol):
     if not all_ok:
         return None
 
-    # ── Tochki vhoda ──
     entry    = price
     sl_price = s_l * 0.9997
     sl_pct   = abs(entry - sl_price) / entry * 100
@@ -194,21 +184,21 @@ def analyze(symbol):
     loss   = round(VOLUME * sl_pct / 100 + fee, 2)
 
     return {
-        "symbol":   symbol,
-        "entry":    round(entry, 8),
-        "tp":       round(entry * (1 + TP_PCT / 100), 8),
-        "sl":       round(sl_price, 8),
-        "sl_pct":   round(sl_pct, 3),
-        "rr":       round(rr_val, 1),
-        "rsi":      round(rsi_v, 1),
-        "vol":      round(s_v / avg_v, 2),
-        "wick":     round(wick_r * 100, 1),
-        "profit":   profit,
-        "loss":     loss,
-        "level":    round(local_low, 8),
-        "session":  get_session(),
-        "e9":       round(e9, 6),
-        "e21":      round(e21, 6),
+        "symbol":  symbol,
+        "entry":   round(entry, 8),
+        "tp":      round(entry * (1 + TP_PCT / 100), 8),
+        "sl":      round(sl_price, 8),
+        "sl_pct":  round(sl_pct, 3),
+        "rr":      round(rr_val, 1),
+        "rsi":     round(rsi_v, 1),
+        "vol":     round(s_v / avg_v, 2),
+        "wick":    round(wick_r * 100, 1),
+        "profit":  profit,
+        "loss":    loss,
+        "level":   round(local_low, 8),
+        "session": get_session(),
+        "e9":      round(e9, 6),
+        "e21":     round(e21, 6),
     }
 
 # ── Telegram ──────────────────────────────────────────────────────────────────
@@ -224,48 +214,84 @@ def send(text):
     except Exception as e:
         log.warning(f"Telegram: {e}")
 
-def format_signal(s):
-    stars = min(int(s["rr"]), 5)
-    quality = "*" * stars + "o" * (5 - stars)
+def format_signal(s, num):
+    stars = "*" * min(int(s["rr"]), 5)
+    stars = stars + "o" * (5 - len(stars))
     return (
-        f"<b>SIGNAL  {s['symbol']}</b>  [{s['session']}]\n\n"
+        f"<b>SIGNAL #{num}  {s['symbol']}</b>  [{s['session']}]\n\n"
         f"Vhod:  <b>${s['entry']}</b>\n"
         f"TP:    <b>${s['tp']}</b>  +{TP_PCT}%\n"
         f"SL:    <b>${s['sl']}</b>  -{s['sl_pct']}%\n\n"
-        f"RR:    1:{s['rr']}  {quality}\n"
+        f"RR:    1:{s['rr']}  {stars}\n"
         f"RSI:   {s['rsi']}\n"
         f"Vol:   x{s['vol']}\n"
         f"Fitil: {s['wick']}%\n\n"
-        f"EMA9:  {s['e9']}\n"
-        f"EMA21: {s['e21']}\n"
-        f"Level: ${s['level']}\n\n"
         f"Pribyl (TP): <b>+${s['profit']}</b>\n"
         f"Ubytok (SL): <b>-${s['loss']}</b>\n"
-        f"Vol: ${VOLUME}  x{LEVERAGE}\n\n"
+        f"Obem: ${VOLUME}  x{LEVERAGE}\n\n"
         f"{now_kyiv().strftime('%d.%m  %H:%M:%S')}"
     )
+
+def format_journal_record(s, num):
+    """Запись в журнал — одна строка для отправки статистики"""
+    return (
+        f"#{num}|{now_kyiv().strftime('%d.%m %H:%M')}|"
+        f"{s['symbol']}|{s['session']}|"
+        f"vhod:{s['entry']}|tp:{s['tp']}|sl:{s['sl']}|"
+        f"sl%:{s['sl_pct']}|rr:1:{s['rr']}|"
+        f"rsi:{s['rsi']}|vol:x{s['vol']}|fitil:{s['wick']}%|"
+        f"REZULTAT:?"
+    )
+
+def send_stats():
+    """Отправляет статистику за день"""
+    if not signal_journal:
+        send("Za segodnya signalov ne bylo.")
+        return
+
+    today = now_kyiv().strftime("%d.%m")
+    text  = f"<b>Statistika za {today}</b>\n"
+    text += f"Vsego signalov: {len(signal_journal)}\n\n"
+    text += "<b>Zhurnal (zameni ? na TP ili SL):</b>\n\n"
+
+    for record in signal_journal[-20:]:
+        text += f"<code>{record}</code>\n"
+
+    text += (
+        "\n<i>Peredaj etot spisok Claude dlya analiza V6</i>"
+    )
+    send(text)
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
+    global signal_counter
+
     send(
-        "<b>Smart Scanner v5.0 zapushen!</b>\n\n"
-        "Strategiya: Multi-Signal Confluence\n"
-        "EMA9/21/50 + RSI Bounce + Liquidity Sweep + Volume\n\n"
-        f"TP: {TP_PCT}% | RR min: 1:{MIN_RR} | Plecho: x{LEVERAGE}\n"
-        f"Depozit: ${DEPOSIT} | Obem: ${VOLUME}\n"
-        "Rezhim: 24/7\n\n"
-        "Zhdu signalov..."
+        "<b>Smart Scanner v5.1 zapushen!</b>\n\n"
+        "Novoe: avtozapis zhurnala sdelok\n"
+        "Kazhdyy den v 23:55 poluchish statistiku\n\n"
+        f"TP: {TP_PCT}% | RR min: 1:{MIN_RR} | x{LEVERAGE}\n"
+        f"Depozit: ${DEPOSIT} | Obem: ${VOLUME}\n\n"
+        "Rezhim: 24/7"
     )
 
-    alerted = {}
+    alerted      = {}
+    last_stat_day = -1
 
     while True:
         try:
-            symbols = fetch_symbols()
             now_ts  = time.time()
+            now_dt  = now_kyiv()
             found   = 0
 
+            # Отправляем статистику в 23:55 каждый день
+            if now_dt.hour == 23 and now_dt.minute == 55 and now_dt.day != last_stat_day:
+                send_stats()
+                signal_journal.clear()
+                last_stat_day = now_dt.day
+
+            symbols = fetch_symbols()
             log.info(f"Scan {len(symbols)} par | {get_session()}")
 
             for symbol in symbols:
@@ -276,14 +302,20 @@ def main():
                     sig = analyze(symbol)
 
                     if sig:
-                        send(format_signal(sig))
+                        signal_counter += 1
+                        num = signal_counter
+
+                        send(format_signal(sig, num))
+
+                        record = format_journal_record(sig, num)
+                        signal_journal.append(record)
+
                         alerted[symbol] = now_ts
                         found += 1
                         log.info(
-                            f"SIGNAL {symbol} "
+                            f"SIGNAL #{num} {symbol} "
                             f"RR:1:{sig['rr']} "
-                            f"Vol:x{sig['vol']} "
-                            f"Fitil:{sig['wick']}%"
+                            f"Vol:x{sig['vol']}"
                         )
 
                     time.sleep(0.15)
