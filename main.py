@@ -12,8 +12,8 @@ TP_PCT = 1.2
 FEE_PCT = 0.1
 
 KYIV_TZ = timezone(timedelta(hours=2))
-TRADE_HOURS = [(9, 11), (16, 18)]
-CHECK_INTERVAL = 300
+TRADE_HOURS = [(0, 24)]
+CHECK_INTERVAL = 60
 
 
 def now_kyiv():
