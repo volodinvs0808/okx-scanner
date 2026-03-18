@@ -125,51 +125,76 @@ def analyze(symbol):
     v = [float(c[5]) for c in candles]
 
     price = c[-1]
-    e9    = ema(c, 9)
-    e21   = ema(c, 21)
-    e50   = ema(c, 50)
+
+    e9  = ema(c, 9)
+    e21 = ema(c, 21)
+    e50 = ema(c, 50)
     if not e9 or not e21 or not e50:
         return None
 
     trend_ok = e9 > e21 > e50 * 0.998
-    rsi_v    = rsi(c, 14)
+
+    rsi_v = rsi(c, 14)
     if rsi_v is None:
         return None
-    rsi_ok     = RSI_LOW <= rsi_v <= RSI_HIGH
+    rsi_ok = RSI_LOW <= rsi_v <= RSI_HIGH
+
     rsi_prev   = rsi(c[:-1], 14)
     rsi_bounce = rsi_prev is not None and rsi_v > rsi_prev
 
+    avg_v  = sum(v[-30:-4]) / 26
+    vol_ok = avg_v > 0 and v[-1] > avg_v * 1.2
+
+    atr_v  = atr(candles, 14)
+    atr_ok = atr_v is not None and (atr_v / price * 100) >= 0.03
+
+    # Тип 1: Liquidity Grab
     local_low = min(l[-28:-4])
     s_o, s_h  = o[-3], h[-3]
     s_l, s_c  = l[-3], c[-3]
     s_v       = v[-3]
+    rng = s_h - s_l
+    sig_type  = None
+    sig_vol   = s_v
+    wick_r    = 0
 
-    swept     = s_l < local_low * 0.9998
-    reclaimed = s_c >= local_low
-    rng       = s_h - s_l
-    if rng < 1e-9:
-        return None
-    wick      = min(s_o, s_c) - s_l
-    wick_r    = wick / rng
-    wick_ok   = wick_r >= WICK_MIN
+    if rng > 1e-9:
+        wick   = min(s_o, s_c) - s_l
+        wick_r = wick / rng
+        swept     = s_l < local_low * 0.9998
+        reclaimed = s_c >= local_low
+        wick_ok   = wick_r >= WICK_MIN
+        conf_ok   = c[-2] > o[-2] and c[-2] > local_low
+        curr_ok   = c[-1] >= o[-2] * 0.9990
+        body_ok   = abs(s_c - s_o) / rng <= 0.55
 
-    avg_v  = sum(v[-30:-4]) / 26
-    vol_ok = avg_v > 0 and s_v > avg_v * 1.2
-    conf_ok = c[-2] > o[-2] and c[-2] > local_low
-    curr_ok = c[-1] > o[-1] and c[-1] >= o[-2] * 0.9995
-    atr_v   = atr(candles, 14)
-    atr_ok  = atr_v is not None and (atr_v / price * 100) >= 0.03
-    body_ok = abs(s_c - s_o) / rng <= 0.55
+        if (trend_ok and rsi_ok and rsi_bounce and swept and reclaimed
+                and wick_ok and vol_ok and conf_ok and curr_ok and atr_ok and body_ok):
+            sig_type = "LIQUIDITY GRAB"
+            sig_vol  = s_v
 
-    if not (trend_ok and rsi_ok and rsi_bounce and swept and reclaimed
-            and wick_ok and vol_ok and conf_ok and curr_ok and atr_ok and body_ok):
+    # Тип 2: Trend Pullback — откат к EMA и отскок
+    if sig_type is None:
+        near_ema   = abs(price - e21) / e21 * 100 < 0.2
+        bounce_ok  = c[-1] > o[-1] and c[-2] > o[-2]
+        above_e50  = price > e50
+        rsi_trend  = 40 <= rsi_v <= 65
+
+        if (trend_ok and near_ema and bounce_ok and above_e50
+                and rsi_trend and rsi_bounce and vol_ok and atr_ok):
+            sig_type = "TREND PULLBACK"
+            sig_vol  = v[-1]
+
+    if sig_type is None:
         return None
 
     entry    = price
-    sl_price = s_l * 0.9997
+    sl_price = min(l[-5:]) * 0.9997
     sl_pct   = abs(entry - sl_price) / entry * 100
+
     if not (SL_MIN_PCT <= sl_pct <= SL_MAX_PCT):
         return None
+
     rr_val = TP_PCT / sl_pct
     if rr_val < MIN_RR:
         return None
@@ -179,19 +204,20 @@ def analyze(symbol):
     loss   = round(VOLUME * sl_pct / 100 + fee, 2)
 
     return {
-        "symbol":  symbol,
-        "entry":   round(entry, 8),
-        "tp":      round(entry * (1 + TP_PCT / 100), 8),
-        "sl":      round(sl_price, 8),
-        "sl_pct":  round(sl_pct, 3),
-        "rr":      round(rr_val, 1),
-        "rsi":     round(rsi_v, 1),
-        "vol":     round(s_v / avg_v, 2),
-        "wick":    round(wick_r * 100, 1),
-        "profit":  profit,
-        "loss":    loss,
-        "level":   round(local_low, 8),
-        "session": get_session(),
+        "symbol":   symbol,
+        "entry":    round(entry, 8),
+        "tp":       round(entry * (1 + TP_PCT / 100), 8),
+        "sl":       round(sl_price, 8),
+        "sl_pct":   round(sl_pct, 3),
+        "rr":       round(rr_val, 1),
+        "rsi":      round(rsi_v, 1),
+        "vol":      round(sig_vol / avg_v, 2),
+        "wick":     round(wick_r * 100, 1),
+        "profit":   profit,
+        "loss":     loss,
+        "level":    round(local_low, 8),
+        "session":  get_session(),
+        "type":     sig_type,
     }
 
 # ── Telegram ──────────────────────────────────────────────────────────────────
